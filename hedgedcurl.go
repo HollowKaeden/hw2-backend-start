@@ -27,11 +27,16 @@ Exit codes:
 `, defaultTimeout)
 }
 
-func printResponse(resp *http.Response) {
+func printResponse(resp *http.Response) error {
 	fmt.Printf("%s %s\n", resp.Proto, resp.Status)
-	resp.Header.Write(os.Stdout)
+	if err := resp.Header.Write(os.Stdout); err != nil {
+		return fmt.Errorf("write headers: %w", err)
+	}
 	fmt.Println()
-	io.Copy(os.Stdout, resp.Body)
+	if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
+		return fmt.Errorf("read body: %w", err)
+	}
+	return nil
 }
 
 func main() {
@@ -49,7 +54,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	url := flag.Args()[0]
+	urls := flag.Args()
+	if len(urls) == 0 {
+		fmt.Fprintln(os.Stderr, "hedgedcurl: no URLs given")
+		printUsage(os.Stderr)
+		os.Exit(1)
+	}
+	url := urls[0]
 	resp, err := http.Get(url)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hedgedcurl:", err)
@@ -57,5 +68,8 @@ func main() {
 	}
 	defer resp.Body.Close()
 
-	printResponse(resp)
+	if err := printResponse(resp); err != nil {
+		fmt.Fprintln(os.Stderr, "hedgedcurl:", err)
+		os.Exit(1)
+	}
 }
