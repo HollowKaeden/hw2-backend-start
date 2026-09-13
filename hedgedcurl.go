@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -25,39 +26,47 @@ Options:
 
 Exit codes:
   0     success
-  1     all requests failed or invalid arguments
+  1     all requests failed, no URLs given or invalid timeout
+  2     invalid command-line flags
   228   timeout
 `, defaultTimeout)
 }
 
-func printResponse(resp *http.Response) error {
+func printResponse(resp *http.Response, body []byte) error {
 	fmt.Printf("%s %s\n", resp.Proto, resp.Status)
 	if err := resp.Header.Write(os.Stdout); err != nil {
 		return fmt.Errorf("write headers: %w", err)
 	}
 	fmt.Println()
-	if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
-		return fmt.Errorf("read body: %w", err)
+	if _, err := os.Stdout.Write(body); err != nil {
+		return fmt.Errorf("write body: %w", err)
 	}
 	return nil
 }
 
 type result struct {
-	url  string
 	resp *http.Response
+	body []byte
 	err  error
 }
 
 func main() {
 	var timeout int
+	var help bool
 
+	flag.BoolVar(&help, "h", false, "")
+	flag.BoolVar(&help, "help", false, "")
 	flag.IntVar(&timeout, "t", defaultTimeout, "")
 	flag.IntVar(&timeout, "timeout", defaultTimeout, "")
 
-	flag.Usage = func() { printUsage(os.Stdout) }
+	flag.Usage = func() { printUsage(os.Stderr) }
 
 	flag.Parse()
 
+	if help {
+		printUsage(os.Stdout)
+		os.Exit(0)
+	}
 	if timeout <= 0 {
 		fmt.Fprintln(os.Stderr, "hedgedcurl: timeout must be a positive number of seconds")
 		os.Exit(1)
@@ -75,26 +84,38 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 	for _, url := range urls {
+		if !strings.Contains(url, "://") {
+			url = "http://" + url
+		}
 		go func() {
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 			if err != nil {
-				results <- result{url: url, err: err}
+				results <- result{err: err}
 				return
 			}
+
 			resp, err := http.DefaultClient.Do(req)
-			results <- result{url: url, resp: resp, err: err}
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				results <- result{err: fmt.Errorf("read body from %s: %w", url, err)}
+				return
+			}
+			results <- result{resp: resp, body: body}
 		}()
 	}
 	for range len(urls) {
 		r := <-results
 		if r.err != nil {
-			fmt.Fprintf(os.Stderr, "hedgedcurl: %s could not be processed: %v\n", r.url, r.err)
+			fmt.Fprintln(os.Stderr, "hedgedcurl:", r.err)
 			continue
 		}
 
-		err := printResponse(r.resp)
-		r.resp.Body.Close()
-		if err != nil {
+		if err := printResponse(r.resp, r.body); err != nil {
 			fmt.Fprintln(os.Stderr, "hedgedcurl:", err)
 			os.Exit(1)
 		}
