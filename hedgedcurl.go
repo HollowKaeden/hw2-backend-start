@@ -39,6 +39,12 @@ func printResponse(resp *http.Response) error {
 	return nil
 }
 
+type result struct {
+	url  string
+	resp *http.Response
+	err  error
+}
+
 func main() {
 	var timeout int
 
@@ -55,21 +61,35 @@ func main() {
 	}
 
 	urls := flag.Args()
+
 	if len(urls) == 0 {
 		fmt.Fprintln(os.Stderr, "hedgedcurl: no URLs given")
 		printUsage(os.Stderr)
 		os.Exit(1)
 	}
-	url := urls[0]
-	resp, err := http.Get(url)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "hedgedcurl:", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
 
-	if err := printResponse(resp); err != nil {
-		fmt.Fprintln(os.Stderr, "hedgedcurl:", err)
-		os.Exit(1)
+	results := make(chan result, len(urls))
+	for _, url := range urls {
+		go func() {
+			resp, err := http.Get(url)
+			results <- result{url: url, resp: resp, err: err}
+		}()
 	}
+	for range len(urls) {
+		r := <-results
+		if r.err != nil {
+			fmt.Fprintf(os.Stderr, "hedgedcurl: %s could not be processed: %v\n", r.url, r.err)
+			continue
+		}
+
+		err := printResponse(r.resp)
+		r.resp.Body.Close()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "hedgedcurl:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	fmt.Fprintln(os.Stderr, "hedgedcurl: all requests failed")
+	os.Exit(1)
 }
