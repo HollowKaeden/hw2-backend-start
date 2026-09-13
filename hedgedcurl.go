@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"time"
 )
 
 const defaultTimeout = 15
@@ -69,9 +72,16 @@ func main() {
 	}
 
 	results := make(chan result, len(urls))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	defer cancel()
 	for _, url := range urls {
 		go func() {
-			resp, err := http.Get(url)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				results <- result{url: url, err: err}
+				return
+			}
+			resp, err := http.DefaultClient.Do(req)
 			results <- result{url: url, resp: resp, err: err}
 		}()
 	}
@@ -89,6 +99,10 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		fmt.Fprintf(os.Stderr, "hedgedcurl: timeout after %ds\n", timeout)
+		os.Exit(228)
 	}
 	fmt.Fprintln(os.Stderr, "hedgedcurl: all requests failed")
 	os.Exit(1)
