@@ -12,13 +12,17 @@ import (
 	"time"
 )
 
-const defaultTimeout = 15
+const (
+	defaultTimeout = 15
+	maxBodySize    = 10 << 20 // 10 MiB
+)
 
 func printUsage(w io.Writer) {
 	fmt.Fprintf(w, `Usage: hedgedcurl [options] URL [URL...]
 
 Sends GET requests to all URLs in parallel and prints the first response
-(status line, headers and body).
+(status line, headers and body). Responses with a body larger than %d MiB
+are treated as failed.
 
 Options:
   -t, --timeout SECONDS   timeout for all HTTP requests (default %d)
@@ -29,7 +33,7 @@ Exit codes:
   1     all requests failed, no URLs given or invalid timeout
   2     invalid command-line flags
   228   timeout
-`, defaultTimeout)
+`, maxBodySize>>20, defaultTimeout)
 }
 
 func printResponse(resp *http.Response, body []byte) error {
@@ -51,6 +55,10 @@ type result struct {
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	var timeout int
 	var help bool
 
@@ -65,11 +73,11 @@ func main() {
 
 	if help {
 		printUsage(os.Stdout)
-		os.Exit(0)
+		return 0
 	}
 	if timeout <= 0 {
 		fmt.Fprintln(os.Stderr, "hedgedcurl: timeout must be a positive number of seconds")
-		os.Exit(1)
+		return 1
 	}
 
 	urls := flag.Args()
@@ -77,7 +85,7 @@ func main() {
 	if len(urls) == 0 {
 		fmt.Fprintln(os.Stderr, "hedgedcurl: no URLs given")
 		printUsage(os.Stderr)
-		os.Exit(1)
+		return 1
 	}
 
 	results := make(chan result, len(urls))
@@ -99,10 +107,14 @@ func main() {
 				results <- result{err: err}
 				return
 			}
-			body, err := io.ReadAll(resp.Body)
+			body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize+1))
 			resp.Body.Close()
 			if err != nil {
 				results <- result{err: fmt.Errorf("read body from %s: %w", url, err)}
+				return
+			}
+			if len(body) > maxBodySize {
+				results <- result{err: fmt.Errorf("response body from %s exceeds %d bytes", url, maxBodySize)}
 				return
 			}
 			results <- result{resp: resp, body: body}
@@ -117,14 +129,14 @@ func main() {
 
 		if err := printResponse(r.resp, r.body); err != nil {
 			fmt.Fprintln(os.Stderr, "hedgedcurl:", err)
-			os.Exit(1)
+			return 1
 		}
-		os.Exit(0)
+		return 0
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		fmt.Fprintf(os.Stderr, "hedgedcurl: timeout after %ds\n", timeout)
-		os.Exit(228)
+		return 228
 	}
 	fmt.Fprintln(os.Stderr, "hedgedcurl: all requests failed")
-	os.Exit(1)
+	return 1
 }
